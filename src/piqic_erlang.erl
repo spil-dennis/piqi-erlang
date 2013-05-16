@@ -169,40 +169,48 @@ piqic_erlang(CallbackMod, Args) ->
     % possible to capture both stdout and sterr (which we need for warnings)
     % separately using Erlang standard library (so, we are capturing
     CompiledPiqi = Filename ++ ".pib",
+    CompiledPiqi2 = Filename ++ ".2.pib",
 
     % capture the original Cwd so that we could restore it later
     Cwd = get_cwd(Odir),
     try
         % call "piqi compile"
-        NormalizeNamesOpt =
+        PiqiPath = find_piqi_executable(),
+        CompileArgs =
             case NormalizeNames of
                 true ->
-                    " --normalize-names";
+                    ["--normalize-names" | OtherArgs];
                 false ->
-                    ""
+                    OtherArgs
             end,
-        PiqiCompile = lists:concat([
-            find_piqi_executable(), " compile",
-            " --self-spec ", SelfSpec,
-            " -o ", CompiledPiqi,
-            " -t pb",
-            " -e erlang",  % automatically load .erlang.piqi extensions
-            NormalizeNamesOpt,
-            " ", join_args(OtherArgs)
-        ]),
-        run_piqi_compile(PiqiCompile),
+        CompiledBytes = piqi_compile(PiqiPath, SelfSpec, CompiledPiqi, CompileArgs),
 
         % read the compiled Piqi bundle: it is just a list containing the module
         % being compiled prepended by its import dependencies (if any)
-        PiqiBundle = read_piqi_bundle(CompiledPiqi),
+        PiqiBundle = piqi_piqi:parse_piqi_bundle(CompiledBytes),
         PiqiList = PiqiBundle#piqi_bundle.piqi,
+
+        % get the list of raw modules that are unparsed and which names are not
+        % normalized
+        NonNormalizedCompiledBytes =
+            case NormalizeNames of
+                true ->
+                    % exclude --normalize-names flag from the list of arguments
+                    % and rerun "piqi compile"
+                    piqi_compile(PiqiPath, SelfSpec, CompiledPiqi2, OtherArgs);
+                false ->
+                    % if name normalization wasn't used, we can just reuse the
+                    % compilation result as is
+                    CompiledBytes
+            end,
+        RawPiqiList = piqirun:parse_list(fun piqi_piqi:parse_binary/1, NonNormalizedCompiledBytes),
 
         % change CWD to output directory if it is defined
         set_cwd(Odir),
 
         % finally, generate code for the last module in the list; the preceding
         % modules (if any) represent imported dependencies
-        Context = piqic:init_context(PiqiList),
+        Context = piqic:init_context(PiqiList, RawPiqiList),
         CallbackMod:generate(Context),
         ok
     catch
@@ -210,8 +218,24 @@ piqic_erlang(CallbackMod, Args) ->
     after
         set_cwd(Cwd),  % restore the original CWD
         file:delete(SelfSpec),
-        file:delete(CompiledPiqi)
+        file:delete(CompiledPiqi),
+        file:delete(CompiledPiqi2)
     end.
+
+
+piqi_compile(PiqiPath, SelfSpec, CompiledPiqi, Args) ->
+    % build piqi compile command
+    PiqiCompile = lists:concat([
+        PiqiPath, " compile",
+        " --self-spec ", SelfSpec,
+        " -o ", CompiledPiqi,
+        " -t pb",
+        " -e erlang",  % automatically load .erlang.piqi extensions
+        " ", join_args(Args)
+    ]),
+    run_piqi_compile(PiqiCompile),
+    {ok, Bytes} = file:read_file(CompiledPiqi),
+    Bytes.
 
 
 set_cwd('undefined') ->ok;
@@ -301,11 +325,6 @@ run_piqi_compile(Cmd) ->
     end.
 
 
-read_piqi_bundle(Filename) ->
-    {ok, Bytes} = file:read_file(Filename),
-    piqi_piqi:parse_piqi_bundle(Bytes).
-
-
 generate(Context) ->
     gen_hrl(Context),
     gen_erl(Context),
@@ -346,10 +365,8 @@ gen_erl(Context) ->
 
 
 gen_embedded_piqi(Context) ->
-    % TODO: the way we pass piqi modules to "piqi server" needs to be revised:
-    % we should probably pass the whole piqi-bundle instead of a list of
-    % pb-encoded piqi modules
-    BinModules = [iolist_to_binary(piqi_piqi:gen_piqi(X)) || X <- Context#context.modules],
+    % list of protobuf-encoded Piqi modules
+    BinModules = Context#context.raw_modules,
     [
         "piqi() ->\n",
         io_lib:format("~p", [BinModules]),

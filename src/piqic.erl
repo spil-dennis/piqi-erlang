@@ -91,7 +91,7 @@ is_piqi_any(Name) ->
 % initialize piqic context from the list of Piqi modules; the module being
 % compiled is the last one in the list; the preceding modules are all of its
 % imported dependencies
-init_context(PiqiList) ->
+init_context(PiqiList, RawPiqiList) ->
     % set erlang_name fields by turning each identifier into Erlang-compliant
     % identifier
     PiqiList2 = [erlname_piqi(X) || X <- PiqiList],
@@ -137,7 +137,9 @@ init_context(PiqiList) ->
         is_self_spec = IsSelfSpec,
 
         modules = PiqiList,
-        module_index = ModIndex
+        module_index = ModIndex,
+
+        raw_modules = RawPiqiList
     }.
 
 
